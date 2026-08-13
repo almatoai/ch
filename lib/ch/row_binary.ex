@@ -130,6 +130,10 @@ defmodule Ch.RowBinary do
     {v, Enum.map(ts, &encoding_type/1)}
   end
 
+  # The parameters only describe how ClickHouse stores the column; on the wire a JSON value is a
+  # length-prefixed string either way (`input_format_binary_read_json_as_string`).
+  defp encoding_type({:json, _params}), do: :json
+
   defp encoding_type({:map = m, kt, vt}) do
     {m, encoding_type(kt), encoding_type(vt)}
   end
@@ -789,6 +793,8 @@ defmodule Ch.RowBinary do
   defp decoding_type({:variant = v, ts}) do
     {v, ts |> Enum.map(&decoding_type/1) |> List.to_tuple()}
   end
+
+  defp decoding_type({:json, _params}), do: :json
 
   defp decoding_type({:map = m, kt, vt}) do
     {m, decoding_type(kt), decoding_type(vt)}

@@ -107,8 +107,49 @@ defmodule Ch.TypesTest do
     test "json" do
       assert decode("JSON") == :json
       assert decode(" JSON ") == :json
+    end
 
-      # TODO JSON(...)
+    test "json with params" do
+      # the parameters are not parsed, just carried, so every form ClickHouse accepts survives
+      params = [
+        "max_dynamic_paths=64",
+        "max_dynamic_types=8, max_dynamic_paths=64",
+        # type hints, including ones whose own type carries parentheses
+        "a UInt32",
+        "a Array(UInt32), b Map(String, UInt32)",
+        "a Decimal(9, 2)",
+        # a quoted string is stepped over whole, parentheses inside it and all
+        "SKIP skipped",
+        "SKIP REGEXP '^tmp'",
+        "SKIP REGEXP '(a|b)'",
+        "a Enum8('(' = 1, ')' = 2)",
+        "max_dynamic_paths=64, a UInt32, SKIP s, SKIP REGEXP '^t'"
+      ]
+
+      for p <- params do
+        assert decode("JSON(#{p})") == {:json, p}, "decoding JSON(#{p})"
+
+        # and the type it round-trips back to is byte-identical
+        assert "JSON(#{p})" |> decode() |> encode() |> IO.iodata_to_binary() == "JSON(#{p})"
+      end
+    end
+
+    test "json with params nested in other types" do
+      assert decode("Array(JSON(a UInt32))") == {:array, {:json, "a UInt32"}}
+
+      assert decode("Map(String, JSON(SKIP s))") == {:map, :string, {:json, "SKIP s"}}
+
+      assert decode("Tuple(JSON(SKIP REGEXP '^t'), String)") ==
+               {:tuple, [{:json, "SKIP REGEXP '^t'"}, :string]}
+
+      # variant members get sorted by their encoded name
+      assert decode("Variant(JSON(a UInt32), String)") ==
+               {:variant, [{:json, "a UInt32"}, :string]}
+
+      assert "Variant(JSON(max_dynamic_paths=64), String)"
+             |> decode()
+             |> encode()
+             |> IO.iodata_to_binary() == "Variant(JSON(max_dynamic_paths=64), String)"
     end
 
     test "datetime" do

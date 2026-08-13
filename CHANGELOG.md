@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+Carried by this fork on top of upstream v0.9.1.
+
+- Support the parameterized `JSON(...)` type, including nested inside another type, where upstream fails to decode it at all. The parameters are carried as text rather than parsed, so `max_dynamic_paths`/`max_dynamic_types`, type hints, `SKIP` and `SKIP REGEXP` all work and round-trip byte-identically. Restores and extends the capability of https://github.com/plausible/ch/pull/309, reverted upstream in https://github.com/plausible/ch/pull/327
+
 ## 0.9.1 (2026-08-11)
 
 - Allow Ecto types to cast 128-bit and 256-bit integers from strings. https://github.com/plausible/ch/pull/422

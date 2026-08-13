@@ -29,7 +29,7 @@ defmodule Ch.Types do
       {"Time", :time, []},
       {"Date32", :date32, []},
       {"Date", :date, []},
-      {"JSON", :json, []},
+      {"JSON", :json, [:json_params]},
       {"Dynamic", :dynamic, [:identifier, :eq, :int]},
       # {"Dynamic", :dynamic, []},
       {"LowCardinality", :low_cardinality, [:type]},
@@ -253,6 +253,42 @@ defmodule Ch.Types do
   def variant(types) when is_list(types), do: {:variant, build_variant(types)}
 
   @doc """
+  Helper for `JSON` ClickHouse type:
+
+      iex> json()
+      :json
+
+      iex> to_string(encode(json()))
+      "JSON"
+
+      iex> decode("JSON")
+      json()
+
+  """
+  def json, do: :json
+
+  @doc """
+  Helper for the parameterized `JSON(...)` ClickHouse type.
+
+  The parameters are kept as the raw text between the parentheses, so any of the forms ClickHouse
+  accepts round-trips unchanged -- hints, `SKIP` and `SKIP REGEXP` included:
+
+      iex> json("max_dynamic_paths=64")
+      {:json, "max_dynamic_paths=64"}
+
+      iex> to_string(encode(json("max_dynamic_paths=64, max_dynamic_types=8")))
+      "JSON(max_dynamic_paths=64, max_dynamic_types=8)"
+
+      iex> decode("JSON(max_dynamic_paths=64)")
+      json("max_dynamic_paths=64")
+
+      iex> decode("JSON(a UInt32, SKIP REGEXP '^tmp')")
+      json("a UInt32, SKIP REGEXP '^tmp'")
+
+  """
+  def json(params) when is_binary(params), do: {:json, params}
+
+  @doc """
   Helper for `Map(K, V)` ClickHouse type:
 
       iex> map(string(), array(string()))
@@ -359,7 +395,7 @@ defmodule Ch.Types do
 
   def decode("DateTime"), do: :datetime
   def decode("Dynamic"), do: :dynamic
-  def decode("JSON" <> _options), do: :json
+  def decode("JSON"), do: :json
 
   def decode(type) do
     try do
@@ -430,6 +466,10 @@ defmodule Ch.Types do
     decode_identifier(rest, 0, rest, stack, acc)
   end
 
+  defp decode([:json_params | stack], <<rest::bytes>>, acc) do
+    decode_json_params(rest, 0, rest, _depth = 0, stack, acc)
+  end
+
   for {encoded, decoded, [_ | _] = args} <- types do
     defp decode([:maybe_named_column | stack], unquote(encoded) <> rest, acc) do
       [:close, {:tuple, [:maybe_named_column]} | stack] = stack
@@ -493,6 +533,7 @@ defmodule Ch.Types do
   defp build_type(:time64 = t, [precision]), do: {t, precision}
   defp build_type(:variant = v, ts), do: {v, build_variant(ts)}
   defp build_type(:dynamic, _max_types), do: :dynamic
+  defp build_type(:json = j, [params]), do: {j, params}
 
   defp build_enum_mapping(mapping) do
     mapping |> :lists.reverse() |> Enum.chunk_every(2) |> Enum.map(fn [k, v] -> {k, v} end)
@@ -524,6 +565,43 @@ defmodule Ch.Types do
   defp decode_string(<<u::utf8, rest::bytes>>, len, original, stack, acc) do
     decode_string(rest, len + utf8_size(u), original, stack, acc)
   end
+
+  # `JSON(...)` parameters are kept as the raw text between the parentheses rather than parsed.
+  # The grammar is unlike every other type's -- `max_dynamic_paths=N` and `max_dynamic_types=M`
+  # sit alongside typed paths (`a UInt32`), `SKIP path` and `SKIP REGEXP 're'` -- and nothing here
+  # needs to look inside. Keeping ClickHouse's own spelling means the type round-trips
+  # byte-identically, which is what `Variant` discriminator ordering depends on.
+  #
+  # The closing `)` is left for the enclosing `:close` to consume, so only the parentheses opened
+  # within the parameters are balanced here. Quoted strings are stepped over whole, so a `(` or
+  # `)` inside a `SKIP REGEXP` doesn't affect the depth.
+  defp decode_json_params(<<?), _::bytes>> = rest, len, original, _depth = 0, stack, acc) do
+    part = :binary.part(original, 0, len)
+    decode(stack, rest, [:binary.copy(part) | acc])
+  end
+
+  defp decode_json_params(<<?), rest::bytes>>, len, original, depth, stack, acc) do
+    decode_json_params(rest, len + 1, original, depth - 1, stack, acc)
+  end
+
+  defp decode_json_params(<<?(, rest::bytes>>, len, original, depth, stack, acc) do
+    decode_json_params(rest, len + 1, original, depth + 1, stack, acc)
+  end
+
+  defp decode_json_params(<<?', rest::bytes>>, len, original, depth, stack, acc) do
+    {quoted, rest} = skip_json_string(rest, 1)
+    decode_json_params(rest, len + quoted, original, depth, stack, acc)
+  end
+
+  defp decode_json_params(<<_c, rest::bytes>>, len, original, depth, stack, acc) do
+    decode_json_params(rest, len + 1, original, depth, stack, acc)
+  end
+
+  # both `''` and `\'` escape a quote inside a ClickHouse string literal
+  defp skip_json_string(<<?\\, _c, rest::bytes>>, len), do: skip_json_string(rest, len + 2)
+  defp skip_json_string(<<?', ?', rest::bytes>>, len), do: skip_json_string(rest, len + 2)
+  defp skip_json_string(<<?', rest::bytes>>, len), do: {len + 1, rest}
+  defp skip_json_string(<<_c, rest::bytes>>, len), do: skip_json_string(rest, len + 1)
 
   @compile inline: [utf8_size: 1]
   defp utf8_size(codepoint) when codepoint <= 0x7F, do: 1
@@ -586,6 +664,10 @@ defmodule Ch.Types do
   def encode({:tuple, types}), do: ["Tuple(", encode_intersperse(types, ", "), ?)]
   def encode({:variant, types}), do: ["Variant(", encode_intersperse(types, ", "), ?)]
   def encode(:dynamic), do: "Dynamic"
+  def encode(:json), do: "JSON"
+  def encode({:json, ""}), do: "JSON"
+  # the parameters went unparsed, so they go back out exactly as they came in
+  def encode({:json, params}), do: ["JSON(", params, ?)]
 
   def encode({:map, key_type, value_type}) do
     ["Map(", encode(key_type), ", ", encode(value_type), ?)]
