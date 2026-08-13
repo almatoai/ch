@@ -209,6 +209,59 @@ defmodule Ch.RowBinaryTest do
       end
     end
 
+    # The discriminator is an index into the member list, which ClickHouse orders by type name --
+    # so the member a value lands in must be chosen from the value's own type, not by taking the
+    # first member whose encoder happens to accept it. These go through encoding_types/1 so the
+    # members reach the picker in their normalized shapes.
+    test "variant picks the member matching the value" do
+      cases = [
+        # an integer is not a Float64 just because Float64 sorts first
+        {"Variant(Bool, Float64, Int64, String)", 42, {:i64, 42}},
+        {"Variant(Bool, Float64, Int64, String)", 4.2, {:f64, 4.2}},
+        {"Variant(Bool, Float64, Int64, String)", true, {:boolean, true}},
+        {"Variant(Bool, Float64, Int64, String)", "42", {:string, "42"}},
+        # ClickHouse's JSON only accepts objects, so a bare string belongs in the String member
+        {"Variant(JSON, String)", "plain", {:string, "plain"}},
+        {"Variant(JSON, String)", %{"k" => 1}, {:json, %{"k" => 1}}},
+        # Time and Time64 must not lose to a permissive JSON member
+        {"Variant(JSON, Time)", ~T[12:34:56], {:time, ~T[12:34:56]}},
+        {"Variant(JSON, Time64(3))", ~T[12:34:56.789], {{:time64, 1000}, ~T[12:34:56.789]}},
+        # a declared Enum member outranks String for one of its own labels
+        {"Variant(Enum8('a' = 1), String)", "a", {{:enum8, %{"a" => 1}}, "a"}},
+        {"Variant(Enum8('a' = 1), String)", "b", {:string, "b"}},
+        # {:decimal, p, s} normalizes to {:decimal32, s}, which is what the picker must match
+        {"Variant(Decimal(9, 2), String)", Decimal.new("1.50"),
+         {{:decimal32, 2}, Decimal.new("1.50")}},
+        # an address is not a plain tuple
+        {"Variant(IPv4, Tuple(UInt8, UInt8, UInt8, UInt8))", {127, 0, 0, 1},
+         {:ipv4, {127, 0, 0, 1}}},
+        {"Variant(Point, Tuple(Float64, Float64))", {1.0, 2.0}, {:point, {1.0, 2.0}}},
+        # an arbitrary binary is not a UUID, so it must fall to the FixedString member
+        {"Variant(FixedString(5), UUID)", "hello", {{:fixed_string, 5}, "hello"}}
+      ]
+
+      for {type, value, {expected_member, expected_value}} <- cases do
+        [{:variant, members} = normalized] = encoding_types([type])
+        <<discriminator, rest::bytes>> = encode_to_binary(normalized, value)
+        picked = Enum.at(members, discriminator)
+
+        assert picked == expected_member,
+               "#{type} <- #{inspect(value)}: picked #{inspect(picked)}"
+
+        # wrapped in a list because byte-sized encoders return a bare integer
+        assert rest == IO.iodata_to_binary([encode(expected_member, expected_value)])
+      end
+    end
+
+    test "variant still falls back to a scan when no member is a natural home" do
+      # nothing claims a charlist, but the String encoder takes iodata
+      assert encode_to_binary({:variant, [:string]}, ~c"hi") == <<0, 2, ?h, ?i>>
+
+      assert_raise ArgumentError, ~r/no matching type found/, fn ->
+        encode_to_binary({:variant, [:boolean]}, "nope")
+      end
+    end
+
     test "tuple with normalized nested types round-trips" do
       dt = ~U[2026-01-02 03:04:05.123Z]
       encoded = IO.iodata_to_binary(encode_rows([[{dt}]], ["Tuple(DateTime64(3, 'UTC'))"]))

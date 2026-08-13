@@ -4,6 +4,7 @@
 
 Carried by this fork on top of upstream v0.9.1.
 
+- RowBinary: pick the `Variant` member matching the value rather than the first member whose encoder happens to accept it, and support `JSON` members.
 - Support the parameterized `JSON(...)` type, including nested inside another type, where upstream fails to decode it at all. The parameters are carried as text rather than parsed, so `max_dynamic_paths`/`max_dynamic_types`, type hints, `SKIP` and `SKIP REGEXP` all work and round-trip byte-identically. Restores and extends the capability of https://github.com/plausible/ch/pull/309, reverted upstream in https://github.com/plausible/ch/pull/327
 - RowBinary: de- and encode dynamic JSON. Restores https://github.com/plausible/ch/pull/296, reverted upstream in https://github.com/plausible/ch/pull/328
 

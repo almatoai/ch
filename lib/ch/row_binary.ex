@@ -342,7 +342,10 @@ defmodule Ch.RowBinary do
   def encode({:variant, _types}, nil), do: 255
 
   def encode({:variant, types}, value) do
-    try_encode_variant(types, 0, value)
+    case variant_member(types, 0, value) do
+      {idx, type} -> [idx, encode(type, value)]
+      nil -> try_encode_variant(types, 0, value)
+    end
   end
 
   def encode(:datetime, %NaiveDateTime{} = datetime) do
@@ -537,6 +540,88 @@ defmodule Ch.RowBinary do
   end
 
   defp encode_many_kv([] = done, _key_type, _value_type), do: done
+
+  # ClickHouse orders `Variant` members by type name, and the discriminator we write is an index
+  # into that order — so the member list is never in preference order. Picking the first member
+  # that merely *accepts* the value therefore encodes every integer of a
+  # `Variant(Bool, Float64, Int64, String)` as a Float64 (Float64 sorts before Int64 and its
+  # encoder guard is `is_number/1`), and every string of a `Variant(..., JSON, String)` as JSON.
+  #
+  # So dispatch on what the value *is* first, and only fall back to try_encode_variant/3 for
+  # values no member is a natural home for.
+  defp variant_member([type | types], idx, value) do
+    if variant_member?(type, value) do
+      {idx, type}
+    else
+      variant_member(types, idx + 1, value)
+    end
+  end
+
+  defp variant_member([], _idx, _value), do: nil
+
+  # These see types that have already been through encoding_type/1, so they must match the
+  # normalized shapes: {:decimal32, scale} rather than {:decimal, precision, scale}, enum mappings
+  # as maps rather than lists, and precisions as time units.
+  defp variant_member?(:boolean, value), do: is_boolean(value)
+  defp variant_member?(:string, value), do: is_binary(value)
+  defp variant_member?(:binary, value), do: is_binary(value)
+
+  defp variant_member?({:fixed_string, size}, value),
+    do: is_binary(value) and byte_size(value) <= size
+
+  # `encode(:uuid, ...)` takes either the raw 16 bytes or the dashed 36-character spelling. Once
+  # this function commits to a member there's no fallback left, so don't claim an arbitrary binary.
+  defp variant_member?(:uuid, <<_::128>>), do: true
+  defp variant_member?(:uuid, <<_::64, ?-, _::32, ?-, _::32, ?-, _::32, ?-, _::96>>), do: true
+  defp variant_member?(:uuid, _value), do: false
+
+  defp variant_member?(:date, value), do: is_struct(value, Date)
+  defp variant_member?(:date32, value), do: is_struct(value, Date)
+  defp variant_member?(:time, value), do: is_struct(value, Time)
+  defp variant_member?({:time64, _unit}, value), do: is_struct(value, Time)
+
+  defp variant_member?(:datetime, value), do: datetime?(value)
+  defp variant_member?({:datetime, _tz}, value), do: datetime?(value)
+  defp variant_member?({:datetime64, _unit}, value), do: datetime?(value)
+  defp variant_member?({:datetime64, _unit, _tz}, value), do: datetime?(value)
+
+  for size <- [32, 64, 128, 256] do
+    defp variant_member?({unquote(:"decimal#{size}"), _scale}, value),
+      do: is_struct(value, Decimal)
+  end
+
+  # An Enum member accepts the integer too, but an integer's natural home is an integer member.
+  defp variant_member?({e, mapping}, value) when e in [:enum8, :enum16],
+    do: is_binary(value) and is_map_key(mapping, value)
+
+  defp variant_member?(:ipv4, value), do: is_tuple(value) and tuple_size(value) == 4
+
+  defp variant_member?(:ipv6, value),
+    do: (is_tuple(value) and tuple_size(value) == 8) or match?(<<_::128>>, value)
+
+  defp variant_member?(:point, value), do: is_tuple(value) and tuple_size(value) == 2
+  defp variant_member?({:array, _type}, value), do: is_list(value)
+  defp variant_member?({:map, _k, _v}, value), do: plain_map?(value)
+  # ClickHouse's JSON type only accepts objects at the top level — a list belongs in an Array
+  # member, or in a String one as JSON text.
+  defp variant_member?(:json, value), do: plain_map?(value)
+  defp variant_member?({:tuple, _types}, value), do: is_tuple(value)
+
+  for size <- [8, 16, 32, 64, 128, 256] do
+    defp variant_member?(unquote(:"u#{size}"), value), do: is_integer(value)
+    defp variant_member?(unquote(:"i#{size}"), value), do: is_integer(value)
+  end
+
+  for size <- [32, 64] do
+    defp variant_member?(unquote(:"f#{size}"), value), do: is_float(value)
+  end
+
+  defp variant_member?(_type, _value), do: false
+
+  # Structs are maps, but a %Date{} belongs in a Date member, not a JSON one.
+  defp plain_map?(value), do: is_map(value) and not is_struct(value)
+
+  defp datetime?(value), do: is_struct(value, DateTime) or is_struct(value, NaiveDateTime)
 
   # TODO find a better way than try/rescue
   defp try_encode_variant([type | types], idx, value) do
