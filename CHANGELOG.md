@@ -5,6 +5,7 @@
 Carried by this fork on top of upstream v0.9.2.
 
 - Keep the options of `JSON(...)` types, nested or not, where upstream decodes every spelling to a bare `:json` (https://github.com/plausible/ch/pull/435). They are carried as text rather than parsed, so `max_dynamic_paths`/`max_dynamic_types`, type hints, `SKIP` and `SKIP REGEXP` all survive and round-trip byte-identically through `Ch.Types.encode/1`. Restores and extends the capability of https://github.com/plausible/ch/pull/309, reverted upstream in https://github.com/plausible/ch/pull/327
+- RowBinary: de- and encode dynamic JSON. Restores https://github.com/plausible/ch/pull/296, reverted upstream in https://github.com/plausible/ch/pull/328
 
 ## 0.9.2 (2026-08-17)
 
