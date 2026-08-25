@@ -604,7 +604,14 @@ defmodule Ch.RowBinary do
   defp variant_member?({:map, _k, _v}, value), do: plain_map?(value)
   # ClickHouse's JSON type only accepts objects at the top level — a list belongs in an Array
   # member, or in a String one as JSON text.
-  defp variant_member?(:json, value), do: plain_map?(value)
+  #
+  # A `Jason.Fragment` is already-serialised JSON that `encode(:json, ...)` splices verbatim, so it
+  # belongs in the JSON member too. Without this it is just a struct, no member claims it, and
+  # `try_encode_variant/3` puts it wherever an encoder happens not to raise. Callers use it to skip
+  # a decode/re-encode round-trip when what they hold is JSON text to begin with — which is the
+  # common case for anything reading JSON out of another system.
+  defp variant_member?(:json, value),
+    do: plain_map?(value) or is_struct(value, Jason.Fragment)
   defp variant_member?({:tuple, _types}, value), do: is_tuple(value)
 
   for size <- [8, 16, 32, 64, 128, 256] do

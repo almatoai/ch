@@ -168,7 +168,7 @@ defmodule Ch.VariantTest do
     parameterize_query!(
       ctx,
       "INSERT INTO variant_json_test FORMAT RowBinary",
-      [[%{"k" => 1}], [%{}], [7], ["plain"], [nil]],
+      [[%{"k" => 1}], [%{}], [7], ["plain"], [nil], [Jason.Fragment.new(~s({"k":1}))]],
       types: [type]
     )
 
@@ -177,7 +177,9 @@ defmodule Ch.VariantTest do
              ["JSON(max_dynamic_paths=64)", %{}],
              ["Int64", 7],
              ["String", "plain"],
-             ["None", nil]
+             ["None", nil],
+             # a fragment reaches the same member as the map it was serialised from
+             ["JSON(max_dynamic_paths=64)", %{"k" => 1}]
            ]
   end
 
