@@ -223,6 +223,8 @@ defmodule Ch.RowBinaryTest do
         # ClickHouse's JSON only accepts objects, so a bare string belongs in the String member
         {"Variant(JSON, String)", "plain", {:string, "plain"}},
         {"Variant(JSON, String)", %{"k" => 1}, {:json, %{"k" => 1}}},
+        # already-serialised JSON is JSON, and writes the same bytes as the map it came from
+        {"Variant(JSON, String)", Jason.Fragment.new(~s({"k":1})), {:json, %{"k" => 1}}},
         # Time and Time64 must not lose to a permissive JSON member
         {"Variant(JSON, Time)", ~T[12:34:56], {:time, ~T[12:34:56]}},
         {"Variant(JSON, Time64(3))", ~T[12:34:56.789], {{:time64, 1000}, ~T[12:34:56.789]}},
