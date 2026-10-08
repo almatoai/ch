@@ -84,6 +84,27 @@ defmodule Ch.Types do
   def json, do: :json
 
   @doc """
+  Helper for `JSON(...)` ClickHouse type with options.
+
+  The options are kept as the raw text between the parentheses, so any of the forms ClickHouse
+  accepts round-trips unchanged -- hints, `SKIP` and `SKIP REGEXP` included:
+
+      iex> json("max_dynamic_paths=64")
+      {:json, "max_dynamic_paths=64"}
+
+      iex> to_string(encode(json("max_dynamic_paths=64, max_dynamic_types=8")))
+      "JSON(max_dynamic_paths=64, max_dynamic_types=8)"
+
+      iex> decode("JSON(max_dynamic_paths=64)")
+      json("max_dynamic_paths=64")
+
+      iex> decode("JSON(a UInt32, SKIP REGEXP '^tmp')")
+      json("a UInt32, SKIP REGEXP '^tmp'")
+
+  """
+  def json(options) when is_binary(options), do: {:json, options}
+
+  @doc """
   Helper for `DateTime` ClickHouse type:
 
       iex> datetime()
@@ -447,7 +468,7 @@ defmodule Ch.Types do
 
   defp decode([:json_options | stack], <<rest::bytes>>, acc) do
     # Options can contain nested types and quoted regexes, so find the matching closing parenthesis.
-    decode_json_options(rest, 0, nil, stack, acc)
+    decode_json_options(rest, 0, rest, 0, nil, stack, acc)
   end
 
   for {encoded, decoded, [_ | _] = args} <- types do
@@ -513,7 +534,7 @@ defmodule Ch.Types do
   defp build_type(:time64 = t, [precision]), do: {t, precision}
   defp build_type(:variant = v, ts), do: {v, build_variant(ts)}
   defp build_type(:dynamic, _max_types), do: :dynamic
-  defp build_type(:json, _options), do: :json
+  defp build_type(:json = j, [options]), do: {j, options}
 
   defp build_enum_mapping(mapping) do
     mapping |> :lists.reverse() |> Enum.chunk_every(2) |> Enum.map(fn [k, v] -> {k, v} end)
@@ -583,45 +604,59 @@ defmodule Ch.Types do
     decode(stack, rest, [int * multiplier | acc])
   end
 
+  # The options are kept as the raw text between the parentheses rather than parsed. Their grammar
+  # is unlike every other type's -- `max_dynamic_paths=N` and `max_dynamic_types=M` sit alongside
+  # typed paths (`a UInt32`), `SKIP path` and `SKIP REGEXP 're'` -- and nothing here needs to look
+  # inside. Keeping ClickHouse's own spelling means the type round-trips byte-identically.
+
   # The JSON type's closing parenthesis ends the options list.
-  defp decode_json_options(<<?), rest::bytes>>, 0, nil, stack, acc) do
-    decode(stack, <<?), rest::bytes>>, acc)
+  defp decode_json_options(<<?), _::bytes>> = rest, len, original, 0, nil, stack, acc) do
+    options = original |> :binary.part(0, len) |> String.trim_trailing()
+    decode(stack, rest, [:binary.copy(options) | acc])
   end
 
   # Opening parentheses belong to nested type hints, such as Tuple(...).
-  defp decode_json_options(<<?(, rest::bytes>>, depth, nil, stack, acc) do
-    decode_json_options(rest, depth + 1, nil, stack, acc)
+  defp decode_json_options(<<?(, rest::bytes>>, len, original, depth, nil, stack, acc) do
+    decode_json_options(rest, len + 1, original, depth + 1, nil, stack, acc)
   end
 
   # A closing parenthesis inside the options list finishes one nested type hint.
-  defp decode_json_options(<<?), rest::bytes>>, depth, nil, stack, acc) do
-    decode_json_options(rest, depth - 1, nil, stack, acc)
+  defp decode_json_options(<<?), rest::bytes>>, len, original, depth, nil, stack, acc) do
+    decode_json_options(rest, len + 1, original, depth - 1, nil, stack, acc)
   end
 
   # ClickHouse strings use single quotes; quoted identifiers use double quotes or backticks.
-  defp decode_json_options(<<quote, rest::bytes>>, depth, nil, stack, acc)
+  defp decode_json_options(<<quote, rest::bytes>>, len, original, depth, nil, stack, acc)
        when quote in [?', ?", ?`] do
-    decode_json_options(rest, depth, quote, stack, acc)
+    decode_json_options(rest, len + 1, original, depth, quote, stack, acc)
   end
 
   # A backslash protects the following character from ending a quoted value.
-  defp decode_json_options(<<?\\, _escaped::utf8, rest::bytes>>, depth, quote, stack, acc)
+  defp decode_json_options(
+         <<?\\, escaped::utf8, rest::bytes>>,
+         len,
+         original,
+         depth,
+         quote,
+         stack,
+         acc
+       )
        when not is_nil(quote) do
-    decode_json_options(rest, depth, quote, stack, acc)
+    decode_json_options(rest, len + 1 + utf8_size(escaped), original, depth, quote, stack, acc)
   end
 
   # The matching quote ends a string literal or quoted identifier.
-  defp decode_json_options(<<quote, rest::bytes>>, depth, quote, stack, acc) do
-    decode_json_options(rest, depth, nil, stack, acc)
+  defp decode_json_options(<<quote, rest::bytes>>, len, original, depth, quote, stack, acc) do
+    decode_json_options(rest, len + 1, original, depth, nil, stack, acc)
   end
 
   # Other characters do not affect parenthesis or quote tracking.
-  defp decode_json_options(<<_char::utf8, rest::bytes>>, depth, quote, stack, acc) do
-    decode_json_options(rest, depth, quote, stack, acc)
+  defp decode_json_options(<<char::utf8, rest::bytes>>, len, original, depth, quote, stack, acc) do
+    decode_json_options(rest, len + utf8_size(char), original, depth, quote, stack, acc)
   end
 
   # Reaching EOF before the JSON type closes is invalid.
-  defp decode_json_options(<<>>, _depth, _quote, _stack, _acc) do
+  defp decode_json_options(<<>>, _len, _original, _depth, _quote, _stack, _acc) do
     raise ArgumentError, "unexpected end of type while decoding"
   end
 
@@ -650,6 +685,9 @@ defmodule Ch.Types do
   def encode({:tuple, types}), do: ["Tuple(", encode_intersperse(types, ", "), ?)]
   def encode({:variant, types}), do: ["Variant(", encode_intersperse(types, ", "), ?)]
   def encode(:dynamic), do: "Dynamic"
+  def encode({:json, ""}), do: "JSON"
+  # the options went unparsed, so they go back out exactly as they came in
+  def encode({:json, options}), do: ["JSON(", options, ?)]
 
   def encode({:map, key_type, value_type}) do
     ["Map(", encode(key_type), ", ", encode(value_type), ?)]

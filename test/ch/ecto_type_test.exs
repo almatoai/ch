@@ -203,6 +203,23 @@ defmodule Ch.EctoTypeTest do
     assert {:ok, %{data: "Hello, World!"}} = Ecto.Type.dump(type, %{data: "Hello, World!"})
   end
 
+  test "JSON with options" do
+    assert {:parameterized, {Ch, {:json, "max_dynamic_paths=64"}}} =
+             type = Ecto.ParameterizedType.init(Ch, type: "JSON(max_dynamic_paths=64)")
+
+    assert Ecto.Type.type(type) == :map
+    assert Ecto.Type.format(type) == "#Ch<JSON(max_dynamic_paths=64)>"
+
+    assert {:ok, %{}} = Ecto.Type.cast(type, %{})
+    assert {:ok, %{data: "Hello, World!"}} = Ecto.Type.cast(type, %{data: "Hello, World!"})
+    assert {:ok, nil} = Ecto.Type.cast(type, nil)
+
+    assert :error = Ecto.Type.cast(type, "{}")
+    assert :error = Ecto.Type.cast(type, [])
+
+    assert {:ok, %{}} = Ecto.Type.dump(type, %{})
+  end
+
   # TODO check size?
   for size <- [8, 16, 32, 64, 128, 256] do
     for {encoded, decoded} <- [{"Int#{size}", :"i#{size}"}, {"UInt#{size}", :"u#{size}"}] do
